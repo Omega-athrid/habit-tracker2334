@@ -1,9 +1,10 @@
 // Service worker: la app abre al instante y funciona sin conexión.
 // Subí la versión cada vez que cambies archivos para forzar la actualización.
-const VERSION = "habitos-v2";
+const VERSION = "habitos-v3";
 const CORE = [
   "./", "index.html", "styles.css", "manifest.webmanifest",
   "js/app.js", "js/store.js", "js/sound.js", "js/icons.js", "js/dates.js", "js/config.js",
+  "js/kit.js", "js/goals.js", "js/coach.js",
   "vendor/supabase.js", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png",
 ];
 

@@ -1,6 +1,9 @@
 import { store } from "./store.js";
 import { sfx, isSoundOn, setSound } from "./sound.js";
 import { ui, habitIcon, HABIT_ICONS } from "./icons.js";
+import { esc, h, toast } from "./kit.js";
+import { renderGoals, refreshGoals } from "./goals.js";
+import { renderCoach } from "./coach.js";
 import {
   toKey, fromKey, todayKey, addDays, weekday, longDate, greeting, cap,
   MONTHS, WEEK_ORDER, WEEK_SHORT,
@@ -11,14 +14,14 @@ const S = {
   user: null,
   habits: [],
   done: new Set(),          // "habitId|YYYY-MM-DD"
+  goals: [],
+  tasks: [],
   view: "today",
   cal: { y: new Date().getFullYear(), m: new Date().getMonth() },
   calSel: null,
 };
 const $app = document.getElementById("app");
 const k = (hid, day) => `${hid}|${day}`;
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const h = (html) => { const t = document.createElement("div"); t.innerHTML = html.trim(); return t.firstElementChild; };
 
 // ═══ Lógica de hábitos ════════════════════════════════════════════════
 const isScheduled = (hb, day) => day >= hb.start_date && (!hb.days || hb.days.includes(weekday(day)));
@@ -65,22 +68,12 @@ function applyTheme(t) {
 applyTheme(getTheme());
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(getTheme()));
 
-// ═══ Toast ════════════════════════════════════════════════════════════
-let toastTimer;
-function toast(msg) {
-  let el = document.querySelector(".toast");
-  if (!el) { el = h(`<div class="toast" role="status"></div>`); document.body.append(el); }
-  el.textContent = msg;
-  requestAnimationFrame(() => el.classList.add("in"));
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("in"), 2400);
-}
 
 // ═══ Arranque ═════════════════════════════════════════════════════════
 async function boot() {
   store.onAuthChange((user) => {
     if (user && !S.user) { S.user = user; loadAndShow(); }
-    else if (!user && S.user) { S.user = null; S.habits = []; S.done = new Set(); renderAuth(); }
+    else if (!user && S.user) { S.user = null; S.habits = []; S.done = new Set(); S.goals = []; S.tasks = []; S.chat = null; S.analyses = null; renderAuth(); }
   });
   S.user = await store.getUser().catch(() => null);
   if (S.user) await loadAndShow(); else renderAuth();
@@ -88,20 +81,50 @@ async function boot() {
   splash.classList.add("out"); setTimeout(() => splash.remove(), 450);
 }
 
+async function loadData() {
+  const [habits, comps, goals, tasks] = await Promise.all([
+    store.listHabits(), store.listCompletions(),
+    // Si todavía no corriste el SQL v2, metas y pendientes quedan vacíos sin romper nada
+    store.listGoals().catch(() => []), store.listTasks().catch(() => []),
+  ]);
+  S.habits = habits;
+  S.done = new Set(comps.map((c) => k(c.habit_id, c.day)));
+  S.goals = goals; S.tasks = tasks;
+}
 async function loadAndShow() {
-  try {
-    const [habits, comps] = await Promise.all([store.listHabits(), store.listCompletions()]);
-    S.habits = habits;
-    S.done = new Set(comps.map((c) => k(c.habit_id, c.day)));
-  } catch (e) { toast(e.message); }
+  try { await loadData(); } catch (e) { toast(e.message); }
   renderShell();
 }
+
+// Lo que las vistas de Metas y Coach necesitan de acá
+const ctx = {
+  S, store,
+  // Recarga todo (p. ej. después de que el coach creó una tarea) y repinta lo que haga falta
+  async reload() { try { await loadData(); } catch (e) { toast(e.message); } if (S.view !== "coach") go(S.view); },
+  refresh: () => refresh(),
+  // Cumplimiento de un hábito en los últimos N días
+  habitRate(hb, n = 7) {
+    const today = todayKey(); let done = 0, total = 0;
+    for (let i = 0; i < n; i++) { const d = addDays(today, -i); if (!isScheduled(hb, d)) continue; total++; if (isDone(hb, d)) done++; }
+    return { done, total };
+  },
+  async addHabit({ name, emoji, frequency, goal_id }) {
+    const FREQ = { "diario": null, "lunes a viernes": [1, 2, 3, 4, 5], "3 veces por semana": [1, 3, 5], "fines de semana": [0, 6] };
+    const color = COLORS[S.habits.length % 10];
+    const created = await store.createHabit({
+      name: String(name).slice(0, 60), icon_type: "emoji", icon: emoji || "✨", icon_color: bestInk(color), color,
+      days: FREQ[frequency] ?? null, start_date: todayKey(), goal_id: goal_id || null,
+    });
+    S.habits.push(created);
+    return created;
+  },
+};
 
 // ═══ Login ════════════════════════════════════════════════════════════
 const MARK = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="currentColor"/><path d="M7.5 12.3l3 3 6-6.3" fill="none" stroke="var(--bg, #F5F4EE)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 function renderAuth() {
-  document.querySelectorAll(".tabbar,.fab").forEach((e) => e.remove());
+  document.querySelectorAll(".tabbar,.fab,.composer").forEach((e) => e.remove());
   const local = store.mode === "local";
   $app.innerHTML = "";
   const el = h(`
@@ -160,10 +183,12 @@ function renderAuth() {
 // ═══ Estructura (pestañas) ════════════════════════════════════════════
 function renderShell() {
   $app.innerHTML = `<main id="view"></main>`;
-  document.querySelectorAll(".tabbar,.fab").forEach((e) => e.remove());
+  document.querySelectorAll(".tabbar,.fab,.composer").forEach((e) => e.remove());
   const bar = h(`
     <nav class="tabbar">
       <button class="tab" data-v="today">${ui("list-checks", 23)}Hoy</button>
+      <button class="tab" data-v="goals">${ui("target", 23)}Metas</button>
+      <button class="tab" data-v="coach">${ui("sparkles", 23)}Coach</button>
       <button class="tab" data-v="calendar">${ui("calendar-days", 23)}Calendario</button>
       <button class="tab" data-v="settings">${ui("settings", 23)}Ajustes</button>
     </nav>`);
@@ -175,13 +200,15 @@ function renderShell() {
 function go(view) {
   S.view = view;
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("on", b.dataset.v === view));
-  document.querySelector(".fab")?.remove();
+  document.querySelectorAll(".fab,.composer").forEach((e) => e.remove());
   const main = document.getElementById("view");
   main.innerHTML = ""; main.className = "view";
   void main.offsetWidth; // reinicia la animación de entrada
   main.style.animation = "none"; requestAnimationFrame(() => (main.style.animation = ""));
   if (view === "today") renderToday(main);
   else if (view === "calendar") renderCalendar(main);
+  else if (view === "goals") renderGoals(main, ctx);
+  else if (view === "coach") renderCoach(main, ctx);
   else renderSettings(main);
   window.scrollTo({ top: 0 });
 }
@@ -190,6 +217,7 @@ function go(view) {
 function refresh() {
   if (S.view === "today") refreshToday();
   else if (S.view === "calendar") refreshCalendar();
+  else if (S.view === "goals") refreshGoals(ctx);
 }
 
 // ═══ Anillo de progreso ═══════════════════════════════════════════════
@@ -643,6 +671,28 @@ function renderSettings(main) {
       <button class="row" data-sound>${ui(isSoundOn() ? "volume-2" : "volume-x", 20)}<div class="grow">Sonidos</div><span class="switch ${isSoundOn() ? "on" : ""}"></span></button>
     </div>`);
   main.append(card);
+
+  // Lo que el coach sabe de vos
+  const prof = h(`
+    <div class="card about-card" style="margin-top:14px">
+      <div class="row">${ui("user-round", 20)}<div class="grow"><b>Sobre vos</b><small>Lo usa el coach para conocerte. Opcional.</small></div></div>
+      <div class="about-body">
+        <input class="about-name" maxlength="40" placeholder="¿Cómo te llamo?">
+        <textarea class="about-text" maxlength="1500" rows="5" placeholder="Ej: 27 años, trabajo de herrero. Quiero tener mi propia herrería, ganar más plata y mudarme a EE.UU. Me cuesta sostener rutinas, ya me quemé otras veces…"></textarea>
+        <button class="btn btn-ghost" data-save-about>Guardar</button>
+      </div>
+    </div>`);
+  main.append(prof);
+  store.getProfile().then((p) => { prof.querySelector(".about-name").value = p.name || ""; prof.querySelector(".about-text").value = p.about || ""; }).catch(() => {});
+  prof.querySelector("[data-save-about]").onclick = async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try {
+      await store.saveProfile({ name: prof.querySelector(".about-name").value.trim(), about: prof.querySelector(".about-text").value.trim() });
+      sfx.save(); toast("Guardado. El coach ya lo sabe 🧠");
+    } catch (err) { toast("Error: " + err.message); }
+    b.disabled = false;
+  };
+
   const card2 = h(`<div class="card" style="margin-top:14px"><button class="row" data-out>${ui("log-out", 20)}<div class="grow">Cerrar sesión</div></button></div>`);
   main.append(card2);
   main.append(h(`<p class="foot">Hábitos · ${S.habits.length} ${S.habits.length === 1 ? "hábito" : "hábitos"} · ${S.done.size} registros</p>`));
@@ -799,7 +849,7 @@ function openEditor(habit) {
     try {
       if (editing) {
         const upd = await store.updateHabit(habit.id, payload);
-        S.habits = S.habits.map((x) => (x.id === upd.id ? upd : x));
+        S.habits = S.habits.map((x) => (x.id === upd.id ? { ...upd, goal_id: x.goal_id } : x));
         toast("Cambios guardados");
       } else {
         const created = await store.createHabit(payload);
