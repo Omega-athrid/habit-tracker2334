@@ -4,6 +4,7 @@ import { ui, habitIcon, HABIT_ICONS } from "./icons.js";
 import { esc, h, toast } from "./kit.js";
 import { renderGoals, refreshGoals } from "./goals.js";
 import { renderCoach } from "./coach.js";
+import { stopSpeaking, stopListening } from "./voice.js";
 import {
   toKey, fromKey, todayKey, addDays, weekday, longDate, greeting, cap,
   MONTHS, WEEK_ORDER, WEEK_SHORT,
@@ -201,6 +202,7 @@ function go(view) {
   S.view = view;
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("on", b.dataset.v === view));
   document.querySelectorAll(".fab,.composer").forEach((e) => e.remove());
+  stopSpeaking(); stopListening();
   const main = document.getElementById("view");
   main.innerHTML = ""; main.className = "view";
   void main.offsetWidth; // reinicia la animación de entrada

@@ -4,6 +4,7 @@ import { sfx } from "./sound.js";
 import { ui } from "./icons.js";
 import { longDate } from "./dates.js";
 import { AREAS } from "./goals.js";
+import { canSpeak, canListen, speak, stopSpeaking, listen, stopListening, isAutoVoice, setAutoVoice } from "./voice.js";
 
 export function renderCoach(main, ctx) {
   const { S } = ctx;
@@ -55,19 +56,25 @@ function renderChat(body, ctx) {
 
   const composer = h(`
     <form class="composer" autocomplete="off">
+      ${canListen ? `<button type="button" class="mic" aria-label="Hablarle al coach">${ui("mic", 21, 2.2)}</button>` : ""}
       <textarea rows="1" maxlength="4000" placeholder="Escribile a tu coach…" enterkeyhint="send"></textarea>
-      <button type="submit" aria-label="Enviar">${ui("send", 20, 2.2)}</button>
+      <button type="submit" class="send" aria-label="Enviar">${ui("send", 20, 2.2)}</button>
     </form>`);
   document.body.append(composer);
-  const ta = composer.querySelector("textarea"), sendBtn = composer.querySelector("button");
+  const ta = composer.querySelector("textarea"), sendBtn = composer.querySelector(".send"), micBtn = composer.querySelector(".mic");
   const grow = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; };
   ta.oninput = grow;
   ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && matchMedia("(pointer: fine)").matches) { e.preventDefault(); composer.requestSubmit(); } };
 
-  let busy = false;
+  let busy = false, callMode = false;
   const scrollEnd = () => requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
   const bubble = (role, text, animate = true) => {
-    const el = h(`<div class="msg ${role}"><div class="bubble">${role === "assistant" ? richText(text) : esc(text).replace(/\n/g, "<br>")}</div></div>`);
+    const el = h(`<div class="msg ${role}"><div class="bubble">${role === "assistant" ? richText(text) : esc(text).replace(/\n/g, "<br>")}</div>${role === "assistant" && canSpeak ? `<button class="say" aria-label="Escuchar">${ui("volume-2", 16)}</button>` : ""}</div>`);
+    const say = el.querySelector(".say");
+    if (say) say.onclick = () => {
+      if (say.classList.contains("on")) { stopSpeaking(); return; }
+      callMode = false; speakReply(text, say);
+    };
     list.append(el);
     if (animate) el.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 300, easing: "cubic-bezier(.2,.8,.2,1)" });
     return el;
@@ -90,8 +97,15 @@ function renderChat(body, ctx) {
       list.append(intro);
     } else {
       S.chat.forEach((m) => bubble(m.role, m.content, false));
-      const tools = h(`<div class="chat-tools"><button class="chip" data-morning>☀️ Buen día</button><button class="chip ghost" data-clear>${ui("rotate-ccw", 14)} Nueva charla</button></div>`);
+      const tools = h(`<div class="chat-tools"><button class="chip" data-morning>☀️ Buen día</button>${canSpeak ? `<button class="chip ${isAutoVoice() ? "on" : ""}" data-voice>${ui(isAutoVoice() ? "volume-2" : "volume-x", 14)} Voz</button>` : ""}<button class="chip ghost" data-clear>${ui("rotate-ccw", 14)} Nueva charla</button></div>`);
       tools.querySelector("[data-morning]").onclick = () => send("", true);
+      const vb = tools.querySelector("[data-voice]");
+      if (vb) vb.onclick = () => {
+        const on = !isAutoVoice(); setAutoVoice(on); sfx.tap();
+        vb.classList.toggle("on", on); vb.innerHTML = `${ui(on ? "volume-2" : "volume-x", 14)} Voz`;
+        if (!on) stopSpeaking();
+        toast(on ? "Voy a leer todas las respuestas en voz alta 🔊" : "Voz apagada (el ☀️ Buen día y el micrófono siguen hablando)");
+      };
       const clear = tools.querySelector("[data-clear]");
       armDelete(clear, "Nueva charla", async () => {
         await ctx.store.clearCoachMessages(); S.chat = []; sfx.remove(); paint();
@@ -101,7 +115,17 @@ function renderChat(body, ctx) {
     window.scrollTo({ top: document.body.scrollHeight });
   }
 
-  async function send(text, morning = false) {
+  // Habla una respuesta y, si estamos "en llamada", vuelve a escuchar al terminar
+  function speakReply(text, btn) {
+    if (!canSpeak) return;
+    const target = btn || list.querySelector(".msg.assistant:last-child .say");
+    speak(text, (on) => {
+      target?.classList.toggle("on", on);
+      if (!on && callMode && document.body.contains(composer)) startListening();
+    });
+  }
+
+  async function send(text, morning = false, viaVoice = false) {
     if (busy) return;
     text = (text || "").trim();
     if (!text && !morning) return;
@@ -116,18 +140,45 @@ function renderChat(body, ctx) {
       const r = await ctx.store.coach({ action: "chat", message: text, morning });
       typing.remove();
       S.chat.push({ role: "assistant", content: r.reply });
-      bubble("assistant", r.reply); sfx.open();
+      bubble("assistant", r.reply);
+      if (morning || viaVoice || isAutoVoice()) speakReply(r.reply); else sfx.open();
       if (r.changed) { await ctx.reload(); toast("Actualicé tus datos ✓"); }
     } catch (e) {
       typing.remove(); S.chat.pop(); list.lastElementChild?.remove();
       if (!morning) { ta.value = text; grow(); }
       if (!S.chat.length) paint();
+      callMode = false;
       toast(e.message);
     }
     busy = false; sendBtn.disabled = false; scrollEnd();
   }
 
-  composer.onsubmit = (e) => { e.preventDefault(); const v = ta.value; ta.value = ""; grow(); send(v); };
+  composer.onsubmit = (e) => { e.preventDefault(); callMode = false; const v = ta.value; ta.value = ""; grow(); send(v); };
+
+  // ── Micrófono: modo llamada ──
+  // Hablás → se manda solo → te contesta en voz alta → vuelve a escucharte.
+  // Se corta si no decís nada o si tocás el micrófono.
+  let listening = false;
+  function startListening() {
+    if (busy || listening) return;
+    listening = true; micBtn.classList.add("on"); composer.classList.add("listening");
+    ta.value = ""; ta.placeholder = callMode ? "En llamada · te escucho…" : "Te escucho…"; grow();
+    navigator.vibrate?.(10);
+    listen({
+      onPartial: (t) => { ta.value = t; grow(); },
+      onError: (m) => toast(m),
+      onEnd: (t) => {
+        listening = false; micBtn.classList.remove("on"); composer.classList.remove("listening");
+        ta.placeholder = "Escribile a tu coach…";
+        if (t) { ta.value = ""; grow(); callMode = true; send(t, false, true); }
+        else callMode = false;
+      },
+    });
+  }
+  if (micBtn) micBtn.onclick = () => {
+    if (listening) { callMode = false; stopListening(); return; }
+    callMode = false; stopSpeaking(); sfx.tap(); startListening();
+  };
 
   if (S.chat) paint();
   else {

@@ -533,3 +533,14 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .about-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 10px; }
 .about-body input, .about-body textarea { width: 100%; font: inherit; font-size: 15px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; outline: 0; resize: vertical; }
 .about-body input:focus, .about-body textarea:focus { border-color: var(--accent); }
+
+/* ─── Voz ────────────────────────────────────────────────────────────── */
+.composer .mic { width: 44px; height: 44px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--text-2); display: grid; place-items: center; flex: none; transition: transform .2s var(--spring), background-color .2s, color .2s; }
+.composer .mic:active { transform: scale(.88); }
+.composer .mic.on { background: #C0392B; border-color: #C0392B; color: #fff; animation: mic-pulse 1.3s ease-out infinite; }
+@keyframes mic-pulse { 0% { box-shadow: 0 0 0 0 rgba(192,57,43,.45); } 100% { box-shadow: 0 0 0 14px rgba(192,57,43,0); } }
+.composer.listening textarea { border-color: #C0392B; }
+.msg.assistant { align-items: flex-end; gap: 4px; }
+.say { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); flex: none; transition: color .2s, background-color .2s; }
+.say.on { color: var(--accent); background: var(--accent-soft); animation: bump 1s var(--spring) infinite; }
+.chat-tools .chip svg { width: 14px; height: 14px; }
